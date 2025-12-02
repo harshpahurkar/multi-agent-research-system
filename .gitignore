@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+
+# Logs and PID files
+*.log
+*.pid
+*.err.log
+*.out.log
+
+# Temp / pip cache dirs
+.pip-cache/
+pip_cache/
+pip_tmp/
+.tmp/
+tmp_pytest/
+
+# Local env
+.env
+
+# OS
+.DS_Store
