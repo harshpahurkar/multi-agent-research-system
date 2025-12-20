@@ -4,6 +4,14 @@ __pycache__/
 *.egg-info/
 .venv/
 
+# Node / frontend deps
+node_modules/
+
+# Frontend build artifacts
+dist/
+test-results/
+*.tsbuildinfo
+
 # Logs and PID files
 *.log
 *.pid
