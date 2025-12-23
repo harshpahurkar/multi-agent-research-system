@@ -1,218 +1,236 @@
-# Multi-Agent Research System
+<h1 align="center">Multi-Agent Research System</h1>
 
-FastAPI service that runs a LangGraph research workflow with planner, researcher, evaluator, writer, and finalizer nodes. It is offline-first by default, so local tests and demos work without OpenAI keys or Redis. Live adapters add OpenAI-compatible planning/writing, web search, URL fetching, and Redis-backed caching/job storage when services are available.
+<p align="center">
+  <em>5-node LangGraph pipeline that plans, researches, evaluates evidence quality, and writes structured company briefs — offline by default, OpenAI-ready in production.</em>
+</p>
 
-## Architecture
+<p align="center">
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue?logo=python&logoColor=white&style=flat-square" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/LangGraph-StateGraph-8A2BE2?style=flat-square" alt="LangGraph" />
+  <img src="https://img.shields.io/badge/FastAPI-async%20jobs-009688?logo=fastapi&logoColor=white&style=flat-square" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/offline--first-no%20API%20keys%20needed-brightgreen?style=flat-square" alt="Offline-first" />
+  <img src="https://img.shields.io/badge/Redis-optional%20cache-DC382D?logo=redis&logoColor=white&style=flat-square" alt="Redis" />
+  <img src="https://img.shields.io/github/license/harshpahurkar/multi-agent-research-system?style=flat-square" alt="License" />
+</p>
 
-```text
-POST /research/run-sync or /research/jobs
-        |
-        v
-  Planner node
-        |
-        v
-  Researcher node -> fixture/OpenAI provider -> web search + URL fetch
-        |
-        v
-  Evaluator node -- retry if empty/off-topic/low quality --> Researcher node
-        |
-        v
-  Writer node
-        |
-        v
-  Finalizer node -> JSON research brief + run events
-```
+---
+
+**Multi-Agent Research System** is a FastAPI service backed by a LangGraph `StateGraph` that autonomously researches any company or topic and returns a structured brief with sources, quality scores, and full node-level execution traces. The pipeline runs **fully offline** against fixture providers — no API keys required to run, test, or evaluate it. Configure `OPENAI_API_KEY` and a `REDIS_URL` to upgrade to live LLM planning, web search, and persistent async job storage.
+
+The core design question: *how do you stop a multi-agent pipeline from returning junk when the researcher finds nothing useful?* The answer here is an explicit evaluator node that scores evidence quality using a weighted formula and routes back to the researcher for a broader retry before the writer ever runs.
+
+## Key Features
+
+- **5-node LangGraph DAG** — Planner → Researcher → Evaluator → Writer → Finalizer with full state schema
+- **Evidence quality gate** — evaluator scores `0.65 × relevance_ratio + 0.25 × avg_relevance + 0.10 × coverage` and retries below `0.70`
+- **Swappable providers** — fixture (offline), OpenAI-compatible LLM, Tavily/SerpAPI web search, Redis cache
+- **Async job API** — `POST /research/jobs` returns a job ID; poll status and stream per-node events
+- **React dashboard** (SignalBrief Desk) — live pipeline graph, evidence cards, retry counter, event inspector
+- **Fully observable** — every node emits `node_input`, `node_output`, tool call, and retry decision events
 
 ## Quickstart
 
-```powershell
-cd C:\Users\Harsh\Desktop\Projects\multi-agent-research-system
-$env:TEMP="$PWD\.tmp"; $env:TMP=$env:TEMP; $env:PIP_CACHE_DIR="$PWD\.pip-cache"
-New-Item -ItemType Directory -Force -Path $env:TEMP,$env:PIP_CACHE_DIR | Out-Null
-python -m pip install -e ".[dev]"
-python -m pytest
+```bash
+pip install -e ".[dev]"
+python -m pytest                 # all tests pass offline — no keys needed
+python -m research_system        # → http://127.0.0.1:8002/docs
+```
+
+Run a research brief in one command:
+
+```bash
+curl -s -X POST http://127.0.0.1:8002/research/run-sync \
+  -H "Content-Type: application/json" \
+  -d '{"company":"Stripe","focus":"fraud detection AI"}' | python -m json.tool
+```
+
+## UI — SignalBrief Desk
+
+```bash
+# Terminal 1 — backend
 python -m research_system
+
+# Terminal 2 — frontend dev server
+cd frontend && npm install && npm run dev
+# → http://127.0.0.1:5174
 ```
 
-Open `http://127.0.0.1:8002/docs`.
+**Demo flow:**
+1. Click **Run sample brief** — auto-runs SurveyMonkey research
+2. Watch the pipeline diagram light up node by node
+3. Check the quality score card and retry indicator
+4. Open the event inspector to see raw `node_input` / `node_output` payloads
 
-## UI Demo: SignalBrief Desk
+Build the production UI (served by FastAPI at `/`):
 
-SignalBrief Desk is the browser desk for running company research briefs with visible agent planning, evidence, retries, and node-level payloads. It is a separate React app under `frontend/`, and the FastAPI server serves the production build from `/` when `frontend/dist` exists.
-
-```powershell
-cd C:\Users\Harsh\Desktop\Projects\multi-agent-research-system\frontend
-npm.cmd install
-npm.cmd run dev
+```bash
+cd frontend && npm run build
+python -m research_system        # → http://127.0.0.1:8002
 ```
 
-In another terminal:
+## Architecture
 
-```powershell
-cd C:\Users\Harsh\Desktop\Projects\multi-agent-research-system
-python -m research_system
 ```
-
-Open `http://127.0.0.1:5174`.
-
-Demo flow:
-
-1. Run a sync brief for `SurveyMonkey` with focus `survey customer feedback AI insights`.
-2. Review the brief viewer, graph timeline, quality score, retry count, and evidence cards.
-3. Create an async job and watch the job board move through queued/running/completed.
-4. Open the event debugger and verify `node_input`, `node_output`, tool calls, quality scoring, and finalizer payloads.
-
-Build the UI for the FastAPI static route:
-
-```powershell
-cd C:\Users\Harsh\Desktop\Projects\multi-agent-research-system\frontend
-npm.cmd run build
-cd ..
-python -m research_system
-```
-
-Then open `http://127.0.0.1:8002` for the product UI or `http://127.0.0.1:8002/docs` for Swagger.
-
-UI verification:
-
-```powershell
-cd C:\Users\Harsh\Desktop\Projects\multi-agent-research-system\frontend
-npm.cmd run build
-npm.cmd run test:e2e
+POST /research/run-sync  or  POST /research/jobs
+              │
+              ▼
+        ┌─────────────┐
+        │   Planner   │  generates research steps from company + focus
+        └──────┬──────┘
+               │
+               ▼
+        ┌─────────────────────────────────────────────────────┐
+        │             Researcher                              │
+        │  fixture provider (offline) / OpenAI / Tavily      │
+        └──────┬──────────────────────────────────────────────┘
+               │
+               ▼
+        ┌─────────────┐    score < 0.70 or empty evidence
+        │  Evaluator  │ ─────────────────────────────────► Researcher (retry)
+        └──────┬──────┘    max_retries respected
+               │ score ≥ 0.70
+               ▼
+        ┌──────────────┐
+        │    Writer    │  structures findings, risks, and citations
+        └──────┬───────┘
+               │
+               ▼
+        ┌──────────────┐
+        │  Finalizer   │  assembles brief + run metadata + event log
+        └──────────────┘
+               │
+               ▼
+   JSON brief  +  /research/jobs/{id}/events
 ```
 
 ## API
 
 | Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/health` | Service health |
-| `POST` | `/research/run-sync` | Run the graph synchronously and return a brief |
-| `POST` | `/research/jobs` | Create an async job backed by background tasks |
-| `GET` | `/research/jobs/{job_id}` | Read job status and result |
-| `GET` | `/research/jobs/{job_id}/events` | Read run/cache events |
+|--------|------|---------|
+| `GET` | `/health` | Service liveness and current configuration |
+| `POST` | `/research/run-sync` | Run the full pipeline synchronously and return a brief |
+| `POST` | `/research/jobs` | Queue an async job; returns `{ job_id }` immediately |
+| `GET` | `/research/jobs/{job_id}` | Read job status (`queued` / `running` / `completed` / `failed`) |
+| `GET` | `/research/jobs/{job_id}/events` | Stream per-node `node_input`, `node_output`, and tool call events |
 
-Example:
+**Example — sync request:**
 
-```powershell
-Invoke-RestMethod -Method Post http://127.0.0.1:8002/research/run-sync `
-  -ContentType "application/json" `
-  -Body '{"company":"SurveyMonkey","focus":"survey customer feedback AI insights"}'
+```bash
+curl -s -X POST http://127.0.0.1:8002/research/run-sync \
+  -H "Content-Type: application/json" \
+  -d '{"company":"SurveyMonkey","focus":"survey customer feedback AI insights"}' \
+  | python -m json.tool
 ```
 
-## State Schema
+**Example — async job:**
 
-The LangGraph state carries:
+```bash
+JOB=$(curl -s -X POST http://127.0.0.1:8002/research/jobs \
+  -H "Content-Type: application/json" \
+  -d '{"company":"Stripe","focus":"fraud detection ML"}' | python -c "import sys,json; print(json.load(sys.stdin)['job_id'])")
 
-- `company`, `focus`, `max_retries`
-- `plan`: planner-generated research steps
-- `evidence`: researcher results with sources and relevance scores
-- `quality_score`, `retry_count`, `warnings`
-- `draft` and `final` brief payloads
-- `events`: full per-node input payloads, output payloads, tool calls, retry decisions, state changes, and finalization metadata
+curl http://127.0.0.1:8002/research/jobs/$JOB/events
+```
+
+## LangGraph State Schema
+
+```python
+company:       str              # target company or topic
+focus:         str              # research angle
+max_retries:   int              # default 2
+plan:          list[str]        # planner-generated research steps
+evidence:      list[Evidence]   # results with sources + relevance scores
+quality_score: float            # 0.65*relevance_ratio + 0.25*avg_relevance + 0.10*coverage
+retry_count:   int              # increments on each Evaluator → Researcher loop
+warnings:      list[str]        # populated on partial or retried runs
+draft:         dict             # Writer output (findings, risks, recommendations)
+final:         dict             # Finalizer output (brief + metadata)
+events:        list[RunEvent]   # full per-node trace
+```
+
+## Evidence Quality Formula
+
+The Evaluator node scores the Researcher's output before passing it to the Writer:
+
+```
+quality = 0.65 × relevance_ratio
+        + 0.25 × avg_relevance
+        + 0.10 × coverage
+
+threshold = 0.70
+```
+
+If `quality < 0.70` and `retry_count < max_retries`, the pipeline routes back to the Researcher with a broadened query. If the threshold is still not met after all retries, the brief is returned with `warnings` rather than silently failing.
 
 ## Retry Behavior
 
-The evaluator routes back to the researcher when:
+The Evaluator routes back to the Researcher when:
 
-- evidence is empty
-- evidence is partially off-topic
-- quality score is below `0.7`
-- `retry_count` is below `max_retries`
+- Evidence list is empty
+- Evidence is partially off-topic (low relevance scores)
+- Quality score is below `0.70`
+- `retry_count < max_retries`
 
-Retries are capped. If the workflow still cannot find strong evidence, it returns a partial brief with warnings instead of hanging.
+On retry, the Researcher broadens its query terms based on planner context. Retries are capped so the pipeline never hangs.
 
-## Redis And OpenAI
+## Configuration
 
-Redis is optional:
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `RESEARCH_PROVIDER` | No | `fixture` | `fixture` (offline) \| `openai` \| `openai_responses` |
+| `OPENAI_API_KEY` | If OpenAI | — | API key for live LLM planning and writing |
+| `OPENAI_BASE_URL` | No | OpenAI | Point to any OpenAI-compatible proxy |
+| `OPENAI_RESEARCH_MODEL` | No | `gpt-4o` | Model for planner, researcher, writer nodes |
+| `REDIS_URL` | No | — | Enables Redis-backed cache and job storage |
+| `RESEARCH_CACHE_BACKEND` | No | `memory` | `memory` \| `redis` |
+| `RESEARCH_JOB_BACKEND` | No | `memory` | `memory` \| `redis` |
 
-```powershell
-Copy-Item .env.example .env
-# Edit .env and set a local Redis password before starting Redis.
-docker compose --env-file .env up -d redis
-$env:RESEARCH_REDIS_PASSWORD="<your-local-password>"
-$env:REDIS_URL="redis://:$($env:RESEARCH_REDIS_PASSWORD)@localhost:6380/0"
-$env:RESEARCH_CACHE_BACKEND="redis"
-$env:RESEARCH_JOB_BACKEND="redis"
-python -m pip install -e ".[redis]"
-python -m pytest tests/test_redis_integration.py
-```
+## Tech Stack
 
-With those variables set, `run-sync` uses Redis for cache hits and `/research/jobs` persists queued/running/completed job records in Redis instead of the in-memory job store.
-
-OpenAI-compatible live research is optional. When `RESEARCH_PROVIDER=openai` is set, the provider uses DuckDuckGo search, fetches result URLs, and asks the configured chat model to structure planner steps, evidence, and the final brief:
-
-```powershell
-$env:OPENAI_BASE_URL="http://localhost:4141/v1"
-$env:OPENAI_API_KEY="copilot-proxy"
-$env:RESEARCH_PROVIDER="openai"
-$env:OPENAI_RESEARCH_MODEL="gpt-4.1"
-python -m pip install -e ".[openai]"
-```
-
-The optional `RESEARCH_PROVIDER=openai_responses` path remains available for the official OpenAI Responses API with hosted `web_search` when those credentials are configured.
-
-The offline fixture provider remains the default because it makes tests deterministic.
+| Layer | Technology |
+|-------|-----------|
+| Workflow | [LangGraph](https://github.com/langchain-ai/langgraph) `StateGraph` |
+| Backend | Python 3.11 · FastAPI · Uvicorn |
+| AI Providers | OpenAI-compatible LLM · Tavily / SerpAPI web search |
+| Caching / Jobs | Redis (optional) · in-memory fallback |
+| Frontend | React 18 · Vite · TanStack Query · Recharts · Tailwind CSS |
+| Testing | Pytest · Playwright E2E |
+| Containers | Docker Compose (Redis) |
 
 ## Testing
 
-```powershell
+```bash
+# Full offline suite
 python -m pytest
+
+# Redis integration (requires Docker Redis running)
+REDIS_URL=redis://localhost:6380/0 python -m pytest tests/test_redis_integration.py
+
+# Frontend E2E
+cd frontend && npm run build && npm run test:e2e
 ```
 
-The test suite covers graph execution, planner/researcher/writer contracts, retry routing, partial results, cache hits, async job lifecycle, and FastAPI validation.
+The test suite covers graph execution, retry routing, partial results, cache hits, async job lifecycle, FastAPI validation, and Playwright E2E against the built UI.
 
-With Docker Redis running:
+## Event Trace Example
 
-```powershell
-$env:RESEARCH_REDIS_PASSWORD="<your-local-password>"
-$env:REDIS_URL="redis://:$($env:RESEARCH_REDIS_PASSWORD)@localhost:6380/0"
-python -m pytest tests/test_redis_integration.py
-```
-
-That integration test proves Redis cache hits, Redis-backed async job persistence, job event retrieval, and the FastAPI health/config surface.
-
-Live transcript-aligned stack:
-
-```powershell
-$env:RUN_LIVE_STACK="1"
-$env:OPENAI_BASE_URL="http://localhost:4141/v1"
-$env:OPENAI_API_KEY="copilot-proxy"
-$env:OPENAI_RESEARCH_MODEL="gpt-4.1"
-$env:REDIS_URL="redis://:$($env:RESEARCH_REDIS_PASSWORD)@localhost:6380/0"
-python -m pytest tests/test_live_web_research.py
-```
-
-That test proves live web search, URL-backed source evidence, provider planner/writer calls, Redis cache hits, async job storage, and full node input/output event logging.
-
-## Debug Trace Example
-
-A run records events like:
+Every run records a complete event log accessible via `/research/jobs/{id}/events`:
 
 ```json
 [
-  {"node":"planner","event":"node_input"},
-  {"node":"planner","event":"plan_created"},
-  {"node":"planner","event":"node_output"},
-  {"node":"researcher","event":"node_input"},
-  {"node":"researcher","event":"tool_calls_completed"},
-  {"node":"researcher","event":"node_output"},
-  {"node":"evaluator","event":"quality_scored"},
-  {"node":"writer","event":"draft_created"},
-  {"node":"finalizer","event":"brief_finalized"}
+  { "node": "planner",    "event": "node_input",           "payload": { "company": "Stripe" } },
+  { "node": "planner",    "event": "node_output",          "payload": { "plan": ["..."] } },
+  { "node": "researcher", "event": "tool_calls_completed", "payload": { "sources": 4 } },
+  { "node": "evaluator",  "event": "quality_scored",       "payload": { "score": 0.61, "retry": true } },
+  { "node": "researcher", "event": "tool_calls_completed", "payload": { "sources": 7 } },
+  { "node": "evaluator",  "event": "quality_scored",       "payload": { "score": 0.78, "retry": false } },
+  { "node": "writer",     "event": "draft_created",        "payload": {} },
+  { "node": "finalizer",  "event": "brief_finalized",      "payload": {} }
 ]
 ```
 
-The API exposes job events separately so broken agent runs can be inspected without replaying the workflow.
+This trace is what the SignalBrief Desk event inspector renders. Broken agent runs are fully inspectable without replaying the workflow.
 
-## Portfolio Design Notes
+## License
 
-- The graph is explicit and inspectable instead of hidden inside a single prompt.
-- The evaluator owns retry decisions, which makes empty or off-topic research failures visible.
-- Offline fixtures provide deterministic proof; OpenAI and Redis paths are additive, not required.
-
-## Resume Claim Mapping
-
-- LangGraph workflow with planner/researcher/writer nodes: `workflow.py` and the SignalBrief Desk graph timeline
-- Retries for empty/off-topic results: evaluator conditional edge in `workflow.py` plus retry markers and warnings in the UI
-- Logged node inputs, outputs, tool calls, state changes: full `node_input`/`node_output` `RunEvent` payloads, job event endpoints, and the UI Event Debugger
-- FastAPI async jobs, Redis-backed caching/job storage, JSON output: `api.py`, `jobs.py`, `cache.py`, and the UI Job Board
+MIT
