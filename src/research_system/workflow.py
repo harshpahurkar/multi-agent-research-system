@@ -57,7 +57,7 @@ def _score_evidence(company: str, focus: str, evidence: list[Evidence]) -> tuple
     relevance_ratio = relevant / len(evidence)
     average_relevance = relevance_total / len(evidence)
     coverage = min(1.0, len(evidence) / 3)
-    score = round((0.65 * relevance_ratio) + (0.25 * average_relevance) + (0.10 * coverage), 4)
+    score = round(min(1.0, max(0.0, (0.65 * relevance_ratio) + (0.25 * average_relevance) + (0.10 * coverage))), 4)
     if score < 0.7:
         warnings.append("Research evidence was thin or partially off-topic.")
     return score, warnings
@@ -80,8 +80,26 @@ class ResearchWorkflow:
             "should_retry": False,
             "status": "running",
         }
-        final_state = self.graph.invoke(initial)
-        return ResearchBrief.model_validate(final_state["final"])
+        try:
+            final_state = self.graph.invoke(initial)
+            final = final_state.get("final")
+            if final is None:
+                raise KeyError("workflow completed without a final brief")
+            return ResearchBrief.model_validate(final)
+        except Exception as exc:
+            events = append_event(initial.get("events"), "workflow", "failed", error=str(exc))
+            return ResearchBrief(
+                company=request.company,
+                focus=request.focus,
+                summary=f"{request.company} research brief could not be completed.",
+                findings=["The workflow failed before it could produce grounded findings."],
+                risks=["Inspect the workflow failure event before using this brief."],
+                sources=[],
+                warnings=[f"Workflow failed: {exc}"],
+                quality_score=0.0,
+                retry_count=initial.get("retry_count", 0),
+                events=events,
+            )
 
     def _compile(self):
         graph = StateGraph(ResearchState)
@@ -104,17 +122,19 @@ class ResearchWorkflow:
 
     def _planner_node(self, state: ResearchState) -> ResearchState:
         events = _append_node_input(state, "planner")
+        company = state.get("company", "Unknown")
+        focus = state.get("focus", "general research")
         planner = getattr(self.provider, "plan", None)
         if callable(planner):
             try:
-                steps = planner(state["company"], state["focus"]).steps
+                steps = planner(company, focus).steps
                 plan_source = "provider"
             except Exception as exc:
-                steps = _plan(state["company"], state["focus"])
+                steps = _plan(company, focus)
                 plan_source = "fallback"
                 state["warnings"] = [*state.get("warnings", []), f"Planner provider failed: {exc}"]
         else:
-            steps = _plan(state["company"], state["focus"])
+            steps = _plan(company, focus)
             plan_source = "local"
         events = append_event(
             events,
@@ -133,21 +153,44 @@ class ResearchWorkflow:
 
     def _researcher_node(self, state: ResearchState) -> ResearchState:
         events = _append_node_input(state, "researcher")
+        company = state.get("company", "Unknown")
+        focus = state.get("focus", "general research")
+        warnings = list(state.get("warnings", []))
         all_evidence: list[Evidence] = []
         retry_count = state.get("retry_count", 0)
-        for raw_step in state["plan"]:
-            step = PlanStep.model_validate(raw_step)
+        raw_plan = state.get("plan")
+        if not raw_plan:
+            warnings.append("Researcher received no plan, so it built a local fallback plan.")
+            events = append_event(events, "researcher", "missing_plan_fallback")
+            raw_plan = [step.model_dump() for step in _plan(company, focus)]
+        for raw_step in raw_plan:
+            try:
+                step = PlanStep.model_validate(raw_step)
+            except Exception as exc:
+                warnings.append(f"Research plan step was invalid and skipped: {exc}")
+                events = append_event(events, "researcher", "invalid_plan_step", error=str(exc), raw_step=raw_step)
+                continue
             query = step.query
             if retry_count > 0:
-                query = f"{step.query} {state['company']} {state['focus']} broader credible sources recent overview"
-            results = self.provider.search(
-                company=state["company"],
-                focus=state["focus"],
-                query=query,
-                retry_count=retry_count,
-            )
-            all_evidence.extend(results)
-        deduped = {f"{item.source}:{item.title}": item for item in all_evidence}
+                query = f"{step.query} {company} {focus} broader credible sources recent overview"
+            try:
+                results = self.provider.search(
+                    company=company,
+                    focus=focus,
+                    query=query,
+                    retry_count=retry_count,
+                )
+            except Exception as exc:
+                warnings.append(f"Research provider failed for step '{step.id}': {exc}")
+                events = append_event(events, "researcher", "tool_call_failed", step=step.id, query=query, error=str(exc))
+                continue
+            for item in results:
+                try:
+                    all_evidence.append(Evidence.model_validate(item))
+                except Exception as exc:
+                    warnings.append(f"Research provider returned invalid evidence for step '{step.id}': {exc}")
+                    events = append_event(events, "researcher", "invalid_evidence", step=step.id, error=str(exc))
+        deduped = {(item.source, item.title): item for item in all_evidence}
         evidence = sorted(deduped.values(), key=lambda item: item.relevance, reverse=True)[:8]
         events = append_event(
             events,
@@ -161,7 +204,7 @@ class ResearchWorkflow:
         diagnostics = _consume_provider_diagnostics(self.provider)
         if diagnostics:
             events = append_event(events, "researcher", "provider_diagnostics", diagnostics=diagnostics)
-        output = {"evidence": [item.model_dump() for item in evidence]}
+        output = {"evidence": [item.model_dump() for item in evidence], "warnings": list(dict.fromkeys(warnings))}
         events = _append_node_output(events, "researcher", output)
         output["events"] = events
         return output
@@ -169,7 +212,7 @@ class ResearchWorkflow:
     def _evaluator_node(self, state: ResearchState) -> ResearchState:
         events = _append_node_input(state, "evaluator")
         evidence = [Evidence.model_validate(item) for item in state.get("evidence", [])]
-        quality_score, warnings = _score_evidence(state["company"], state["focus"], evidence)
+        quality_score, warnings = _score_evidence(state.get("company", "Unknown"), state.get("focus", "general research"), evidence)
         retry_count = state.get("retry_count", 0)
         should_retry = quality_score < 0.7 and retry_count < state.get("max_retries", 2)
         next_retry_count = retry_count + 1 if should_retry else retry_count
@@ -199,11 +242,13 @@ class ResearchWorkflow:
 
     def _writer_node(self, state: ResearchState) -> ResearchState:
         events = _append_node_input(state, "writer")
+        company = state.get("company", "Unknown")
+        focus = state.get("focus", "general research")
         evidence = [Evidence.model_validate(item) for item in state.get("evidence", [])]
         writer = getattr(self.provider, "write_brief", None)
         if callable(writer):
             try:
-                model_brief = writer(state["company"], state["focus"], evidence)
+                model_brief = writer(company, focus, evidence)
                 brief = model_brief.model_dump()
                 brief["warnings"] = state.get("warnings", [])
                 brief["quality_score"] = state.get("quality_score", 0.0)
@@ -237,9 +282,9 @@ class ResearchWorkflow:
             "Fixture mode may miss late-breaking company updates.",
         ]
         brief = {
-            "company": state["company"],
-            "focus": state["focus"],
-            "summary": f"{state['company']} research brief focused on {state['focus']}.",
+            "company": company,
+            "focus": focus,
+            "summary": f"{company} research brief focused on {focus}.",
             "findings": findings,
             "risks": risks,
             "sources": list(dict.fromkeys(item.source for item in evidence)),
@@ -255,7 +300,35 @@ class ResearchWorkflow:
 
     def _finalizer_node(self, state: ResearchState) -> ResearchState:
         events = _append_node_input(state, "finalizer")
-        brief = ResearchBrief.model_validate(state["draft"])
+        draft = state.get("draft")
+        if draft is None:
+            events = append_event(events, "finalizer", "missing_draft_fallback")
+            draft = {
+                "company": state.get("company", "Unknown"),
+                "focus": state.get("focus", "general research"),
+                "summary": f"{state.get('company', 'Unknown')} research brief could not be drafted.",
+                "findings": ["No draft was available, so the finalizer produced a partial brief."],
+                "risks": ["Inspect earlier workflow events before using this brief."],
+                "sources": [],
+                "warnings": [*state.get("warnings", []), "Finalizer received no draft."],
+                "quality_score": state.get("quality_score", 0.0),
+                "retry_count": state.get("retry_count", 0),
+            }
+        try:
+            brief = ResearchBrief.model_validate(draft)
+        except Exception as exc:
+            events = append_event(events, "finalizer", "invalid_draft_fallback", error=str(exc))
+            brief = ResearchBrief(
+                company=state.get("company", "Unknown"),
+                focus=state.get("focus", "general research"),
+                summary=f"{state.get('company', 'Unknown')} research brief could not be validated.",
+                findings=["The writer produced an invalid draft, so the finalizer returned a partial brief."],
+                risks=["Inspect the invalid draft event before using this brief."],
+                sources=[],
+                warnings=[*state.get("warnings", []), f"Finalizer rejected invalid draft: {exc}"],
+                quality_score=state.get("quality_score", 0.0),
+                retry_count=state.get("retry_count", 0),
+            )
         events = append_event(
             events,
             "finalizer",
