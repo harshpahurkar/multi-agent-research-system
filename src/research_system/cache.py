@@ -15,6 +15,8 @@ class Cache(Protocol):
 
 
 class InMemoryCache:
+    _MAX_SIZE = 256
+
     def __init__(self) -> None:
         self._items: dict[str, ResearchBrief] = {}
 
@@ -22,6 +24,9 @@ class InMemoryCache:
         return self._items.get(key)
 
     def set(self, key: str, value: ResearchBrief) -> None:
+        if key not in self._items and len(self._items) >= self._MAX_SIZE:
+            oldest = next(iter(self._items))
+            del self._items[oldest]
         self._items[key] = value
 
 
