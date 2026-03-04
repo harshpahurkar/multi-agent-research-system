@@ -122,8 +122,8 @@ class ResearchService:
         model = os.getenv("OPENAI_RESEARCH_MODEL") or default_model_for_provider(provider)
         raw = json.dumps(
             {
-                "company": request.company.lower(),
-                "focus": request.focus.lower(),
+                "company": request.company.strip().lower(),
+                "focus": request.focus.strip().lower(),
                 "max_retries": request.max_retries,
                 "provider": provider,
                 "model": model,
