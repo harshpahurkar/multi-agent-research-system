@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Literal, NotRequired, Required, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def utc_now() -> datetime:
@@ -11,9 +14,17 @@ def utc_now() -> datetime:
 
 
 class ResearchRequest(BaseModel):
-    company: str = Field(min_length=2)
-    focus: str = Field(default="company strategy, product, risks", min_length=3)
+    company: str = Field(min_length=2, max_length=120)
+    focus: str = Field(default="company strategy, product, risks", min_length=3, max_length=300)
     max_retries: int = Field(default=2, ge=0, le=5)
+
+    @field_validator("company", "focus", mode="before")
+    @classmethod
+    def _sanitize(cls, value: str) -> str:
+        if not isinstance(value, str):
+            return value
+        # Strip ASCII control characters (except tab/newline which Pydantic trims anyway)
+        return _CONTROL_CHARS_RE.sub("", value).strip()
 
 
 class PlanStep(BaseModel):
@@ -72,6 +83,7 @@ class JobRecord(BaseModel):
     job_id: str
     status: Literal["queued", "running", "completed", "failed"]
     request: ResearchRequest
+    retry_count: int = 0
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     result: ResearchBrief | None = None
