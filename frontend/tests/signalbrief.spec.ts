@@ -10,6 +10,7 @@ test("SignalBrief Desk runs sync and async research flows", async ({ page }) => 
   await expect(page.locator("#brief").getByRole("heading", { name: "SurveyMonkey" })).toBeVisible({ timeout: 90_000 });
   await expect(page.locator("#graph").getByText("planner", { exact: true })).toBeVisible();
 
+  await page.getByText("Async mode").click();
   await page.getByRole("button", { name: /create async job/i }).click();
   await expect(page.locator("#jobs").getByText("Job Board")).toBeVisible();
   await expect(page.locator("#jobs").getByText(/completed|running|queued/i).first()).toBeVisible({ timeout: 120_000 });

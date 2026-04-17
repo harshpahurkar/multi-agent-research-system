@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { api, JobRecord, ResearchBrief, RunEvent } from "./api";
+import { api, Health, JobRecord, ResearchBrief, RunEvent } from "./api";
 
 const nodes = ["planner", "researcher", "evaluator", "writer", "finalizer"];
 const navItems = [
@@ -32,10 +32,38 @@ const navItems = [
 ];
 const navIds = navItems.map((item) => item.id);
 
-function evidenceFrom(events: RunEvent[]) {
-  const researcherOutput = events.find((item) => item.node === "researcher" && item.event === "node_output");
+function researchSnapshot(events: RunEvent[]) {
+  const latestToolEvent = [...events]
+    .reverse()
+    .find((item) => item.node === "researcher" && item.event === "tool_calls_completed");
+  if (latestToolEvent) {
+    return {
+      evidence: (latestToolEvent.payload.evidence as Array<Record<string, unknown>> | undefined) ?? [],
+      retryCount: Number(latestToolEvent.payload.retry_count ?? 0),
+      source: "latest researcher pass"
+    };
+  }
+  const researcherOutput = [...events]
+    .reverse()
+    .find((item) => item.node === "researcher" && item.event === "node_output");
   const output = researcherOutput?.payload?.output as { evidence?: Array<Record<string, unknown>> } | undefined;
-  return output?.evidence ?? [];
+  return { evidence: output?.evidence ?? [], retryCount: 0, source: "node output" };
+}
+
+function providerLabel(health?: Health) {
+  if (!health) return "Connecting";
+  if (health.provider === "fixture") return "Offline fixture";
+  if (health.provider === "openai_responses") return "Live Responses";
+  if (health.provider === "openai" || health.provider === "web") return "Live web";
+  return health.provider;
+}
+
+function sourceKind(source: string) {
+  if (source.startsWith("fixture://")) return "fixture";
+  if (source.startsWith("responses://")) return "provider diagnostic";
+  if (source.startsWith("web://")) return "web diagnostic";
+  if (/^https?:\/\//.test(source)) return "live url";
+  return "source";
 }
 
 function formatScore(value: number | undefined) {
@@ -120,6 +148,56 @@ function JsonPanel({ title, value }: { title: string; value: unknown }) {
   );
 }
 
+function SourceGate({
+  health,
+  quality,
+  sourceCount,
+  retryCount,
+  backendError
+}: {
+  health?: Health;
+  quality?: number;
+  sourceCount: number;
+  retryCount: number;
+  backendError: string;
+}) {
+  const fixtureMode = health?.provider === "fixture";
+  return (
+    <section className={`source-gate ${fixtureMode ? "fixture" : "live"}`} role={backendError ? "alert" : undefined}>
+      <div>
+        <span className="eyebrow">Trust gate</span>
+        <h2>{backendError ? "Research backend is offline" : providerLabel(health)}</h2>
+        <p>
+          {backendError ||
+            (fixtureMode
+              ? "Offline fixture mode is for demos and CI. Do not treat a high score as current market research."
+              : "Live provider mode still needs source review before external use.")}
+        </p>
+      </div>
+      <div className="gate-metrics">
+        <span>Quality {quality === undefined ? "--" : formatScore(quality)}</span>
+        <span>{sourceCount || "--"} sources</span>
+        <span>{retryCount} retries</span>
+      </div>
+    </section>
+  );
+}
+
+function SourceReference({ source }: { source: string }) {
+  const kind = sourceKind(source);
+  if (kind === "fixture") {
+    return <span className="source-reference fixture-source">{source}</span>;
+  }
+  if (kind.includes("diagnostic")) {
+    return <span className="source-reference diagnostic-source">{source}</span>;
+  }
+  return (
+    <a className="source-reference" href={source} target="_blank" rel="noreferrer">
+      <ExternalLink size={14} /> {source}
+    </a>
+  );
+}
+
 export default function App() {
   const [eventDrawerOpen, setEventDrawerOpen] = useState(false);
   const [guideVisible, setGuideVisible] = useState(() => localStorage.getItem("signalbrief:start-guide") !== "hidden");
@@ -146,9 +224,11 @@ export default function App() {
 
   const activeBrief = jobQuery.data?.result ?? syncRun.data?.result;
   const activeEvents = eventQuery.data?.events ?? jobQuery.data?.events ?? syncRun.data?.events ?? activeBrief?.events ?? [];
-  const evidence = evidenceFrom(activeEvents);
+  const snapshot = researchSnapshot(activeEvents);
+  const evidence = snapshot.evidence;
   const isRunning = syncRun.isPending || createJob.isPending || jobQuery.data?.status === "running" || jobQuery.data?.status === "queued";
   const firstLoad = health.isPending && !health.data && !activeBrief;
+  const backendError = health.error instanceof Error ? health.error.message : health.error ? String(health.error) : "";
 
   function dismissGuide() {
     localStorage.setItem("signalbrief:start-guide", "hidden");
@@ -183,13 +263,21 @@ export default function App() {
           <div>
             <span className="eyebrow">Traceable company research</span>
             <h1>SignalBrief Desk</h1>
-            <p>Stop trusting one-shot AI briefs. This checks the evidence first, retries if it is weak, and shows every source it used.</p>
+            <p>Generate the brief, then check provider mode, evidence quality, and the latest source pass before trusting it.</p>
           </div>
           <div className="status-pill">
             <span className={health.data?.status === "ok" ? "dot ok" : "dot"} />
-            {health.data?.provider ?? "Connecting"} / {health.data?.job_backend ?? "jobs"}
+            {backendError ? "Backend offline" : `${providerLabel(health.data)} / ${health.data?.job_backend ?? "jobs"}`}
           </div>
         </header>
+
+        <SourceGate
+          health={health.data}
+          quality={activeBrief?.quality_score}
+          sourceCount={activeBrief?.sources.length ?? evidence.length}
+          retryCount={activeBrief?.retry_count ?? snapshot.retryCount}
+          backendError={backendError}
+        />
 
         {guideVisible && !activeBrief && (
           <section className="start-guide">
@@ -210,18 +298,20 @@ export default function App() {
           </section>
         )}
 
-        <section className="metric-grid">
-          {firstLoad ? (
-            Array.from({ length: 4 }).map((_, index) => <SkeletonCard key={index} />)
-          ) : (
-            <>
+        {(activeBrief || firstLoad) && (
+          <section className="metric-grid compact-metrics">
+            {firstLoad ? (
+              Array.from({ length: 4 }).map((_, index) => <SkeletonCard key={index} />)
+            ) : (
+              <>
               <StatCard icon={BriefcaseBusiness} label="Company" value={activeBrief?.company ?? "--"} detail={activeBrief ? "Brief target loaded." : "Choose a company to research."} />
               <StatCard icon={Sparkles} label="Quality score" value={metricScore(activeBrief?.quality_score)} detail={activeBrief ? `${metricScore(activeBrief.quality_score)} against a 0.70 writing threshold.` : "Run a brief to see evaluator confidence."} />
               <StatCard icon={GitBranch} label="Retry count" value={activeBrief ? String(activeBrief.retry_count) : "--"} detail={activeBrief ? (activeBrief.retry_count > 0 ? "Evidence was weak, so it tried again." : "Evidence cleared without retry.") : "Retries happen only when evidence is weak."} />
               <StatCard icon={ExternalLink} label="Sources" value={activeBrief?.sources?.length ? String(activeBrief.sources.length) : "--"} detail={activeBrief ? "Open evidence cards below." : "Sources appear after research runs."} />
-            </>
-          )}
-        </section>
+              </>
+            )}
+          </section>
+        )}
 
         <section className="card panel" id="runner">
           <div className="section-heading">
@@ -252,10 +342,10 @@ export default function App() {
           <div className="section-heading">
             <div>
               <span className="eyebrow">Evidence receipts</span>
-              <h2>Sources the brief is allowed to use</h2>
+              <h2>Latest source pass</h2>
             </div>
           </div>
-          <p className="section-copy">These cards are the trust layer. If the evidence is thin, off-topic, or missing, the evaluator should either retry or warn you before the brief is written.</p>
+          <p className="section-copy">Showing {snapshot.source}. Fixture sources are demo evidence, not current web citations.</p>
           <div className="evidence-grid">
             {evidence.map((item, index) => (
               <article className="evidence-card" key={`${String(item.source)}-${index}`}>
@@ -263,10 +353,12 @@ export default function App() {
                   <strong>{String(item.title)}</strong>
                   <span>{formatScore(Number(item.relevance))}</span>
                 </div>
+                <div className="source-meta">
+                  <span>{sourceKind(String(item.source))}</span>
+                  <span>retry {snapshot.retryCount}</span>
+                </div>
                 <p>{String(item.text).slice(0, 360)}</p>
-                <a href={String(item.source)} target="_blank" rel="noreferrer">
-                  <ExternalLink size={14} /> {String(item.source)}
-                </a>
+                <SourceReference source={String(item.source)} />
                 <div className="tag-row">
                   {((item.topics as string[]) ?? []).map((topic) => <span key={topic}>{topic}</span>)}
                 </div>
@@ -317,7 +409,6 @@ export default function App() {
             {!activeEvents.length && <div className="empty-state">Run a brief first. This will show the exact planner input, researcher output, evaluator score, retry decision, writer draft, and finalizer payload.</div>}
           </div>
         </section>
-        <footer className="portfolio-footer">Part of an AI ops portfolio built around one idea: you can&apos;t trust what you can&apos;t see.</footer>
       </section>
       <EventDrawer open={eventDrawerOpen} events={activeEvents} onClose={() => setEventDrawerOpen(false)} />
     </main>
@@ -401,10 +492,13 @@ function RunForm({
         {syncPending ? <Loader2 className="spin" size={16} /> : <Send size={16} />}
         Run sync brief
       </button>
-      <button className="secondary" type="button" disabled={asyncPending} onClick={(event) => onAsync(payload(event.currentTarget.form as HTMLFormElement))}>
-        {asyncPending ? <Loader2 className="spin" size={16} /> : <Clock3 size={16} />}
-        Create async job
-      </button>
+      <details className="async-details">
+        <summary>Async mode</summary>
+        <button className="secondary" type="button" disabled={asyncPending} onClick={(event) => onAsync(payload(event.currentTarget.form as HTMLFormElement))}>
+          {asyncPending ? <Loader2 className="spin" size={16} /> : <Clock3 size={16} />}
+          Create async job
+        </button>
+      </details>
     </form>
   );
 }
@@ -425,6 +519,7 @@ function JobBoard({ job, created }: { job?: JobRecord; created?: { job_id: strin
         <span>Events</span>
         <strong>{job?.events.length ?? 0}</strong>
       </div>
+      {job?.status === "failed" && <div className="alert error">{job.error ?? "Job failed without a stored error."}</div>}
     </div>
   );
 }

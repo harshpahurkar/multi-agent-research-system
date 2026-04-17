@@ -53,6 +53,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.text();
+    let parsed: { detail?: unknown; error?: unknown } | null = null;
+    try {
+      parsed = JSON.parse(body) as { detail?: unknown; error?: unknown };
+    } catch {
+      parsed = null;
+    }
+    const detail = parsed?.detail ?? parsed?.error;
+    if (typeof detail === "string") {
+      throw new Error(detail);
+    }
+    if (Array.isArray(detail)) {
+      throw new Error(detail.map((item) => JSON.stringify(item)).join("; "));
+    }
     throw new Error(body || `${response.status} ${response.statusText}`);
   }
   return response.json() as Promise<T>;
