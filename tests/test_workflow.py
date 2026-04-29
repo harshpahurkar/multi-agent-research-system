@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from research_system.jobs import ResearchService, default_model_for_provider
 from research_system.models import ResearchRequest
 from research_system.providers import OpenAIResponsesProvider
 from research_system.workflow import ResearchWorkflow
+
+
+def test_fixture_corpus_file_is_committed_for_offline_default() -> None:
+    corpus = Path("data/fixtures/research_corpus.json")
+    assert corpus.exists()
+    records = json.loads(corpus.read_text(encoding="utf-8"))
+    assert len(records) >= 10
+    assert {"SurveyMonkey", "Shopify", "Acme Analytics"} <= {record["company"] for record in records}
 
 
 def test_workflow_completes_with_relevant_evidence() -> None:
@@ -43,6 +54,46 @@ def test_workflow_retries_and_returns_partial_brief_for_unknown_company() -> Non
     assert brief.quality_score < 0.7
     assert brief.warnings
     assert brief.sources == ["fixture://fallback"]
+
+
+def test_provider_search_failure_returns_partial_brief_with_events() -> None:
+    class BrokenProvider:
+        diagnostics: list[dict] = []
+
+        def search(self, *, company: str, focus: str, query: str, retry_count: int):
+            raise RuntimeError(f"search failed for {query}")
+
+    workflow = ResearchWorkflow(provider=BrokenProvider())
+    brief = workflow.run(
+        ResearchRequest(company="BrokenCo", focus="research resilience", max_retries=1),
+        job_id="broken-provider",
+    )
+
+    assert brief.company == "BrokenCo"
+    assert brief.quality_score < 0.7
+    assert brief.warnings
+    assert any(event.node == "researcher" and event.event == "tool_call_failed" for event in brief.events)
+    assert any("partial" in finding.lower() for finding in brief.findings)
+
+
+def test_researcher_falls_back_when_state_has_no_plan() -> None:
+    workflow = ResearchWorkflow()
+    output = workflow._researcher_node(
+        {
+            "job_id": "misrouted",
+            "company": "SurveyMonkey",
+            "focus": "survey customer feedback AI insights",
+            "max_retries": 1,
+            "retry_count": 0,
+            "warnings": [],
+            "events": [],
+            "should_retry": False,
+            "status": "running",
+        }
+    )
+
+    assert output["evidence"]
+    assert any("fallback plan" in warning for warning in output["warnings"])
 
 
 def test_service_cache_records_hit_on_second_run() -> None:

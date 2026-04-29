@@ -24,6 +24,11 @@ class ResearchProvider(Protocol):
 class FixtureResearchProvider:
     def __init__(self, fixture_path: str | Path | None = None) -> None:
         path = Path(fixture_path) if fixture_path else Path(__file__).resolve().parents[2] / "data" / "fixtures" / "research_corpus.json"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Offline research fixture corpus is missing at {path}. "
+                "The fixture file is required for the default no-API-key demo path."
+            )
         self.records = [Evidence.model_validate(item) for item in json.loads(path.read_text(encoding="utf-8"))]
         self.diagnostics: list[dict[str, str]] = []
 
@@ -220,6 +225,7 @@ class OpenAICompatibleWebResearchProvider:
             ],
             temperature=0,
             max_tokens=max_tokens,
+            timeout=30,
         )
         content = response.choices[0].message.content or ""
         return json.loads(_extract_json_object(content))
@@ -395,6 +401,7 @@ class OpenAIResponsesProvider:
                     },
                 ],
                 text_format=OpenAIEvidenceList,
+                timeout=30,
             )
             parsed = response.output_parsed
             return parsed.evidence[:5]
@@ -431,6 +438,7 @@ class OpenAIResponsesProvider:
                     },
                 ],
                 text_format=OpenAIPlan,
+                timeout=30,
             ).output_parsed
         except Exception as exc:
             self.diagnostics.append({"event": "responses_plan_failed", "error": str(exc)})
@@ -457,6 +465,7 @@ class OpenAIResponsesProvider:
                     },
                 ],
                 text_format=OpenAIBrief,
+                timeout=30,
             )
             parsed = response.output_parsed
             return ResearchBrief(
